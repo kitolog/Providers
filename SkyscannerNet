@@ -1,0 +1,742 @@
+'use strict';
+const axios = require('axios');
+const xml2js = require('xml2js');
+const http = require('http');
+const querystring = require('querystring');
+
+class SkyscannerNetProvider {
+    constructor() {
+        this.url = 'http://partners.api.skyscanner.net/';
+        this.apiKeyFlights = 'your_flights_key';
+        this.apiKeyHotels = 'your_hotels_key';
+        this.location = 'DE';
+        this.currency = 'EUR';
+        this.lang = 'en-US';
+
+        this.axiosInstance = axios.create({
+            baseURL : `${this.url}apiservices`,
+            timeout : 10000,
+            headers : {
+                'Accept' : 'application/json'
+            }
+        });
+
+        this.queryParamsMapping = {
+            /**
+             * flight
+             */
+            fromDestination : 'originplace',
+            toDestination   : 'destinationplace',
+            departDate      : 'outbounddate',
+            returnDate      : 'inbounddate',
+            adults          : 'adults',
+            children        : 'children',
+            infants         : 'infants',
+
+            /**
+             * hotels
+             */
+            placeId  : 'entityId',
+            checkIn  : 'checkindate',
+            checkOut : 'checkoutdate',
+            guests   : 'guests',
+            rooms    : 'rooms'
+        };
+
+        this.queryParamsPrepare = {};
+    }
+
+    getItemProperty(item, propertyName, defaultValue) {
+        if (item.hasOwnProperty(propertyName) && item[propertyName] && ((item[propertyName] > 0) || (item[propertyName].length > 0) || (Object.keys(item[propertyName]).length > 0))) {
+            return item[propertyName];
+        } else {
+            return defaultValue;
+        }
+    }
+
+    getItemDefinedProperty(item, propertyName, defaultValue) {
+        if (item.hasOwnProperty(propertyName)) {
+            return item[propertyName];
+        } else {
+            return defaultValue;
+        }
+    }
+
+    autoCompleteLocations(query) {
+        let data = {
+            items : []
+        };
+        return new Promise((resolve, reject) => {
+            if (query && (query.length > 2)) {
+                console.log(`/autosuggest/v1.0/${this.location}/${this.currency}/${this.lang}/`, {
+                    params : {
+                        query  : query,
+                        apiKey : this.apiKeyFlights
+                    }
+                });
+                this.axiosInstance.get(`/autosuggest/v1.0/${this.location}/${this.currency}/${this.lang}/`,
+                    {
+                        params : {
+                            query  : query,
+                            apiKey : this.apiKeyFlights
+                        }
+                    })
+                    .then((response) => {
+                        if (response.status !== 200) {
+                            reject('Api statusCode ' + response.status);
+                            return;
+                        }
+
+                        if (response && response.hasOwnProperty('data') && response.data && response.data.hasOwnProperty('Places') && response.data.Places && (response.data.Places.length > 0)) {
+                            for (let i = 0; i < response.data.Places.length; i++) {
+                                let placeData = {
+                                    name     : this.getItemProperty(response.data.Places[i], 'PlaceName', ''),
+                                    code     : this.getItemProperty(response.data.Places[i], 'PlaceId', '')
+                                        .replace('-sky', ''),
+                                    placeId  : this.getItemProperty(response.data.Places[i], 'PlaceId', ''),
+                                    cityId   : this.getItemProperty(response.data.Places[i], 'CityId', '')
+                                        .replace('-sky', ''),
+                                    regionId : this.getItemProperty(response.data.Places[i], 'RegionId', ''),
+                                    country  : this.getItemProperty(response.data.Places[i], 'CountryName', '')
+                                };
+
+                                let type = null;
+                                if (placeData.cityId) {
+                                    if (placeData.cityId == placeData.code) {
+                                        type = 'airport';
+                                    } else {
+                                        type = 'city';
+                                    }
+                                } else if (placeData.regionId) {
+                                    type = 'region';
+                                } else if (placeData.country) {
+                                    type = 'country';
+                                }
+
+                                placeData['type'] = type;
+                                data.items.push(placeData);
+                            }
+                        }
+
+                        resolve(data);
+                    })
+                    .catch((e) => {
+                        console.log('SkyscannerNet:autosuggest Exception:', e);
+                        if (e.status !== 200) {
+                            reject('Api statusCode ' + e.status);
+                        } else {
+                            reject('Exception!');
+                        }
+                    });
+            } else {
+                reject('Check search query');
+            }
+        });
+    }
+
+    searchFlights(params) {
+        let queryParams = {
+            apiKey   : this.apiKeyFlights,
+            country  : this.location,
+            currency : this.currency,
+            locale   : this.lang
+        };
+
+        if ((typeof params !== 'undefined') && (Object.keys(params).length > 0)) {
+            let key;
+            for (key in params) {
+                if (this.queryParamsMapping.hasOwnProperty(key)) {
+                    let value = params[key];
+                    if (this.queryParamsPrepare.hasOwnProperty(key)) {
+                        if (this.queryParamsPrepare[key] == 'int') {
+                            value = parseInt(value);
+                        }
+                    }
+                    if (value && !(value == '0' || value == '')) {
+                        queryParams[this.queryParamsMapping[key]] = value;
+                    }
+                }
+            }
+        }
+
+        const postData = querystring.stringify(queryParams);
+        return new Promise((resolve, reject) => {
+            axios.create({
+                baseURL : 'http://partners.api.skyscanner.net/apiservices/',
+                timeout : 10000,
+                headers : {
+                    'Content-Type' : 'application/x-www-form-urlencoded',
+                    'Accept'       : 'application/json'
+                }
+            })
+                .post('/pricing/v1.0/', postData)
+                .then((response) => {
+                    if (response.status !== 201) {
+                        reject('Api statusCode ' + response.status);
+                        return;
+                    }
+
+                    console.log('flights response!');
+                    if (response && response.hasOwnProperty('headers') && response.headers && response.headers.hasOwnProperty('location') && response.headers.location) {
+                        console.log('url: ', response.headers.location);
+                        let url = response.headers.location;
+                        this.flightsPolling({
+                            url      : url,
+                            page     : this.getItemProperty(params, 'page', 0),
+                            pageSize : this.getItemProperty(params, 'pageSize', 10)
+                        })
+                            .then((data) => {
+                                resolve(data);
+                            })
+                            .catch((e) => {
+                                reject('SkyscannerNet:polling error!');
+                                console.log('SkyscannerNet:polling Exception:', e);
+                            });
+                    } else {
+                        reject('No location in headers!');
+                    }
+                })
+                .catch((e) => {
+                    console.log('SkyscannerNet:apiservices Exception:', e);
+                    if (e.status !== 200) {
+                        reject('Api statusCode ' + e.status);
+                    }                    
+                    reject('Exception!');
+                });
+        });
+    }
+
+    flightsPolling(params) {
+        let data = {
+            items : []
+        };
+        return new Promise((resolve, reject) => {
+            if (this.getItemProperty(params, 'url', null) === null) {
+                reject('No flights polling url provided!');
+                return;
+            }
+
+            data['resultsUrl'] = params['url'];
+            let queryParams = {
+                apiKey       : this.apiKeyFlights,
+                pageindex    : this.getItemProperty(params, 'page', 0),
+                pagesize     : this.getItemProperty(params, 'pageSize', 10),
+                includeQuery : true
+            };
+
+            this.axiosInstance.get(params['url'],
+                {
+                    params : queryParams
+                })
+                .then((response) => {
+                    if (response.status !== 200) {
+                        reject('Api statusCode ' + response.status);
+                        return;
+                    }
+
+                    if (response && response.hasOwnProperty('data') && response.data) {
+                        if (response.data.hasOwnProperty('Itineraries') && response.data.Legs && (response.data.Itineraries.length > 0)) {
+                            let currenciesMapping = {},
+                                placesMapping = {},
+                                agentsMapping = {},
+                                carriersMapping = {},
+                                segmentsMapping = {},
+                                legsMapping = {};
+
+                            for (let i = 0; i < response.data.Currencies.length; i++) {
+                                currenciesMapping[response.data.Currencies[i]['Code']] =
+                                    response.data.Currencies[i];
+                            }
+
+                            let places = response.data.Places.reverse();
+                            for (let i = 0; i < places.length; i++) {
+                                let place = places[i];
+                                if (place.hasOwnProperty('ParentId') && placesMapping.hasOwnProperty(place['ParentId']) && placesMapping[place['ParentId']]) {
+                                    place['parent'] = placesMapping[place['ParentId']];
+                                }
+                                placesMapping[place['Id']] = place;
+                            }
+
+                            for (let i = 0; i < response.data.Agents.length; i++) {
+                                agentsMapping[response.data.Agents[i]['Id']] = response.data.Agents[i];
+                            }
+
+                            for (let i = 0; i < response.data.Carriers.length; i++) {
+                                carriersMapping[response.data.Carriers[i]['Id']] =
+                                    response.data.Carriers[i];
+                            }
+
+                            for (let i = 0; i < response.data.Segments.length; i++) {
+                                let segment = response.data.Segments[i];
+
+                                if (segment.hasOwnProperty('OriginStation') && segment.OriginStation && placesMapping.hasOwnProperty(segment.OriginStation) && placesMapping[segment.OriginStation]) {
+                                    segment['originStation'] = placesMapping[segment.OriginStation];
+                                }
+
+                                if (segment.hasOwnProperty('DestinationStation') && segment.DestinationStation && placesMapping.hasOwnProperty(segment.DestinationStation) && placesMapping[segment.DestinationStation]) {
+                                    segment['destinationStation'] =
+                                        placesMapping[segment.DestinationStation];
+                                }
+
+                                if (segment.hasOwnProperty('Carrier') && segment.Carrier && carriersMapping.hasOwnProperty(segment.Carrier) && carriersMapping[segment.Carrier]) {
+                                    segment['carrier'] = placesMapping[segment.Carrier];
+                                }
+
+                                if (segment.hasOwnProperty('OperatingCarrier') && segment.OperatingCarrier && carriersMapping.hasOwnProperty(segment.OperatingCarrier) && carriersMapping[segment.OperatingCarrier]) {
+                                    segment['operatingCarrier'] = placesMapping[segment.OperatingCarrier];
+                                }
+                                segmentsMapping[response.data.Segments[i]['Id']] = segment;
+                            }
+
+                            for (let i = 0; i < response.data.Legs.length; i++) {
+                                let leg = response.data.Legs[i];
+                                if (leg.hasOwnProperty('SegmentIds') && leg.SegmentIds && (leg.SegmentIds.length > 0)) {
+                                    leg['segments'] = [];
+                                    for (let j = 0; j < leg.SegmentIds.length; j++) {
+                                        if (segmentsMapping.hasOwnProperty(leg.SegmentIds[j]) && segmentsMapping[leg.SegmentIds[j]]) {
+                                            leg['segments'].push(segmentsMapping[leg.SegmentIds[j]])
+                                        }
+                                    }
+                                }
+
+                                let carrierNames = [];
+
+                                if (leg.hasOwnProperty('Carriers') && leg.Carriers && (leg.Carriers.length > 0)) {
+                                    leg['carriers'] = [];
+                                    for (let j = 0; j < leg.Carriers.length; j++) {
+                                        if (carriersMapping.hasOwnProperty(leg.Carriers[j]) && carriersMapping[leg.Carriers[j]]) {
+                                            leg['carriers'].push(carriersMapping[leg.Carriers[j]]);
+                                            carrierNames.push(carriersMapping[leg.Carriers[j]]['Name']);
+                                        }
+                                    }
+                                }
+
+                                if (carrierNames.length > 0) {
+                                    leg['carriersString'] = carrierNames.join(' - ');
+                                }
+
+                                if (leg.hasOwnProperty('OperatingCarriers') && leg.OperatingCarriers && (leg.OperatingCarriers.length > 0)) {
+                                    leg['operatingCarriers'] = [];
+                                    for (let j = 0; j < leg.OperatingCarriers.length; j++) {
+                                        if (carriersMapping.hasOwnProperty(leg.OperatingCarriers[j]) && carriersMapping[leg.OperatingCarriers[j]]) {
+                                            leg['operatingCarriers'].push(carriersMapping[leg.OperatingCarriers[j]])
+                                        }
+                                    }
+                                }
+
+                                if (leg.hasOwnProperty('OriginStation') && leg.OriginStation && placesMapping.hasOwnProperty(leg.OriginStation) && placesMapping[leg.OriginStation]) {
+                                    leg['originStation'] = placesMapping[leg.OriginStation];
+                                }
+
+                                if (leg.hasOwnProperty('DestinationStation') && leg.DestinationStation && placesMapping.hasOwnProperty(leg.DestinationStation) && placesMapping[leg.DestinationStation]) {
+                                    leg['destinationStation'] = placesMapping[leg.DestinationStation];
+                                }
+
+                                legsMapping[leg['Id']] = leg;
+                            }
+
+                            for (let i = 0; i < response.data.Itineraries.length; i++) {
+                                let itinerary = response.data.Itineraries[i],
+                                    itineraryData = {};
+                                if (legsMapping.hasOwnProperty(itinerary.OutboundLegId) && legsMapping[itinerary.OutboundLegId]) {
+                                    itineraryData['outbound'] = {
+                                        departDate      : this.getItemProperty(legsMapping[itinerary.OutboundLegId], 'Departure', ''),
+                                        arrivalDate     : this.getItemProperty(legsMapping[itinerary.OutboundLegId], 'Arrival', ''),
+                                        departLocation  : this.getItemProperty(this.getItemProperty(legsMapping[itinerary.OutboundLegId], 'originStation', {}), 'Name', ''),
+                                        arrivalLocation : this.getItemProperty(this.getItemProperty(legsMapping[itinerary.OutboundLegId], 'destinationStation', {}), 'Name', ''),
+                                        stops           : this.getItemProperty(legsMapping[itinerary.OutboundLegId], 'Stops', []).length,
+                                        duration        : this.getItemProperty(legsMapping[itinerary.OutboundLegId], 'Duration', '')
+                                    };
+                                }
+
+                                if (legsMapping.hasOwnProperty(itinerary.InboundLegId) && legsMapping[itinerary.InboundLegId]) {
+                                    itineraryData['inbound'] = {
+                                        departDate      : this.getItemProperty(legsMapping[itinerary.InboundLegId], 'Departure', ''),
+                                        arrivalDate     : this.getItemProperty(legsMapping[itinerary.InboundLegId], 'Arrival', ''),
+                                        departLocation  : this.getItemProperty(this.getItemProperty(legsMapping[itinerary.InboundLegId], 'originStation', {}), 'Name', ''),
+                                        arrivalLocation : this.getItemProperty(this.getItemProperty(legsMapping[itinerary.InboundLegId], 'destinationStation', {}), 'Name', ''),
+                                        stops           : this.getItemProperty(legsMapping[itinerary.InboundLegId], 'Stops', []).length,
+                                        duration        : this.getItemProperty(legsMapping[itinerary.InboundLegId], 'Duration', '')
+                                    };
+                                }
+
+                                if (itinerary.hasOwnProperty('PricingOptions') && itinerary.PricingOptions && (itinerary.PricingOptions.length > 0)) {
+                                    itinerary['prices'] = [];
+                                    for (let j = 0; j < itinerary.PricingOptions.length; j++) {
+                                        let priceOption = itinerary.PricingOptions[j];
+                                        if (priceOption.hasOwnProperty('Agents') && priceOption.Agents && (priceOption.Agents.length > 0)) {
+                                            priceOption['agents'] = [];
+                                            for (let k = 0; k < priceOption.Agents.length; k++) {
+                                                if (agentsMapping.hasOwnProperty(priceOption.Agents[k]) && agentsMapping[priceOption.Agents[k]]) {
+                                                    priceOption['agents'].push(agentsMapping[priceOption.Agents[k]]);
+                                                }
+                                            }
+                                        }
+
+                                        itineraryData['price'] = priceOption['Price'];
+                                        break;
+                                    }
+                                }
+
+                                data.items.push(itineraryData);
+                            }
+
+                            resolve(data);
+                        } else {
+                            console.log('No flight Itineraries found');
+                            resolve(data);
+                        }
+                    } else {
+                        console.log('No flight data found');
+                        resolve(data);
+                    }
+                })
+                .catch((e) => {
+                    console.log('SkyscannerNet:flightsPolling Exception:', e);
+                    if (e.status !== 200) {
+                        reject('Api statusCode ' + e.status);
+                    } else {
+                        reject('Exception! ');
+                    }
+                });
+        });
+    }
+
+    autoCompleteHotels(query) {
+        let data = {
+            items : []
+        };
+        return new Promise((resolve, reject) => {
+            if (query && (query.length > 2)) {
+                console.log(`/hotels/autosuggest/v2/${this.location}/${this.currency}/${this.lang}/${query}`, {
+                    params : {
+                        apiKey : this.apiKeyHotels
+                    }
+                });
+                this.axiosInstance.get(`/hotels/autosuggest/v2/${this.location}/${this.currency}/${this.lang}/${query}`,
+                    {
+                        params : {
+                            query  : query,
+                            apiKey : this.apiKeyHotels
+                        }
+                    })
+                    .then((response) => {
+                        if (response.status !== 200) {
+                            reject('Api statusCode ' + response.status);
+                            return;
+                        }
+
+                        if (response && response.hasOwnProperty('data') && response.data && response.data.hasOwnProperty('places') && response.data.places && (response.data.places.length > 0)) {
+                           for (let i = 0; i < response.data.results.length; i++) {
+                                let placeData = {
+                                    id            : this.getItemProperty(response.data.results[i], 'individual_id', ''),
+                                    name          : this.getItemProperty(response.data.results[i], 'display_name', ''),
+                                    type          : this.getItemProperty(response.data.results[i], 'geo_type', ''),
+                                    localisedType : this.getItemProperty(response.data.results[i], 'localised_geo_type', ''),
+                                    isBookable    : this.getItemDefinedProperty(response.data.results[i], 'is_bookable', '')
+                                };
+
+                                data.items.push(placeData);
+                            }
+                        }
+
+                        resolve(data);
+                    })
+                    .catch((e) => {
+                        if (e.status !== 200) {
+                            reject('Api statusCode ' + e.status);
+                            console.log(e);
+                        } else {
+                            reject('Exception! ');
+                        }
+                    });
+            }
+        });
+    }
+
+    searchHotels(params) {
+        let data = {
+                items : []
+            },
+            queryParams = {
+                apiKey   : this.apiKey,
+                country  : this.location,
+                currency : this.currency,
+                locale   : this.lang
+            };
+
+        if ((typeof params !== 'undefined') && (Object.keys(params).length > 0)) {
+            let key;
+            for (key in params) {
+                if (this.queryParamsMapping.hasOwnProperty(key)) {
+                    let value = params[key];
+                    if (this.queryParamsPrepare.hasOwnProperty(key)) {
+                        if (this.queryParamsPrepare[key] == 'int') {
+                            value = parseInt(value);
+                        }
+                    }
+                    if (value && !(value == '0' || value == '')) {
+                        queryParams[this.queryParamsMapping[key]] = value;
+                    }
+                }
+            }
+        }
+
+        return new Promise((resolve, reject) => {
+            this.axiosInstance.get(`/hotels/liveprices/v2/${this.location}/${this.currency}/${this.lang}/${params['placeId']}/${params['checkIn']}/${params['checkOut']}/${params['guests']}/${params['rooms']}`,
+                {
+                    params : {
+                        apiKey : this.apiKeyHotels
+                    }
+                })
+                .then((response) => {
+                    if (response.status !== 200) {
+                        reject('Api statusCode ' + response.status);
+                        return;
+                    }
+
+                    if (response && response.hasOwnProperty('headers') && response.headers && response.headers.hasOwnProperty('location') && response.headers.location) {
+                        let url = response.headers.location;
+
+                        this.hotelsPolling({
+                            url      : url,
+                            page     : this.getItemProperty(params, 'page', 0),
+                            pageSize : this.getItemProperty(params, 'pageSize', 10)
+                        })
+                            .then((data) => {
+                                console.log('DATA!');
+                                resolve(data);
+                            })
+                            .catch((e) => {
+                                console.log('SkyscannerNet:searchHotels Exception:', e);
+                                reject('SearchHotels error!');
+                            });
+
+                        data['resultsUrl'] = url;
+                    } else {
+                        reject('No location in headers!');
+                    }
+                })
+                .catch(function (e) {
+                    console.log('SkyscannerNet:searchHotels Exception:', e);
+                    if (e.status !== 200) {
+                        reject('Api statusCode ' + e.status);
+                    }
+
+                    reject('Exception! ');
+                });
+        });
+    }
+
+    hotelsPolling(params) {
+        let data = {
+            items : []
+        };
+
+        return new Promise((resolve, reject) => {
+            if (this.getItemProperty(params, 'url', null) === null) {
+                reject('No flights polling url provided!');
+                return;
+            }
+
+            data['resultsUrl'] = params['url'];
+            let queryParams = {
+                pageIndex : this.getItemProperty(params, 'page', 0),
+                pageSize  : this.getItemProperty(params, 'pageSize', 10)
+            };
+
+            this.axiosInstance.get(`${this.url}${params['url']}`,
+                {
+                    params : queryParams
+                })
+                .then((response) => {
+                    if (response.status !== 200) {
+                        reject('Api statusCode ' + response.status);
+                        return;
+                    }
+
+                    if (response && response.hasOwnProperty('data') && response.data) {
+                        if (response.data.hasOwnProperty('hotels') && response.data.hotels && (response.data.hotels.length > 0)) {
+                            let amenitiesMapping = {},
+                                hotelsMapping = {},
+                                agentsMapping = {},
+                                hotelsPriceMapping = {};
+
+                            data['totalCount'] = this.getItemProperty(response.data, 'total_hotels');
+                            data['totalAvailableCount'] =
+                                this.getItemProperty(response.data, 'total_available_hotels');
+
+                            for (let i = 0; i < response.data.amenities.length; i++) {
+                                amenitiesMapping[response.data.amenities[i]['id']] =
+                                    response.data.amenities[i];
+                            }
+
+                            for (let i = 0; i < response.data.agents.length; i++) {
+                                agentsMapping[response.data.agents[i]['id']] =
+                                    response.data.agents[i];
+                            }
+
+                            for (let i = 0; i < response.data.hotels.length; i++) {
+                                let hotel = response.data.hotels[i];
+                                if (hotel.hasOwnProperty('amenities') && hotel.amenities && (hotel.amenities.length > 0)) {
+                                    hotel['preparedAmenities'] = [];
+                                    for (let j = 0; j < hotel.amenities.length; j++) {
+                                        if (amenitiesMapping.hasOwnProperty(hotel.amenities[j]) && amenitiesMapping[hotel.amenities[j]]) {
+                                            hotel['preparedAmenities'].push(amenitiesMapping[hotel.amenities[j]]);
+                                        }
+                                    }
+                                }
+
+                                hotelsMapping[hotel['hotel_id']] = hotel;
+                            }
+
+                            for (let i = 0; i < response.data.hotels_prices.length; i++) {
+                                let hotelPrice = response.data.hotels_prices[i];
+
+                                if (hotelsMapping.hasOwnProperty(hotelPrice['id']) && hotelsMapping[hotelPrice.id]) {
+                                    hotelPrice['hotel'] = hotelsMapping[hotelPrice.id];
+                                }
+
+                                if (hotelPrice.hasOwnProperty('agent_prices') && hotelPrice.agent_prices && (hotelPrice.agent_prices.length > 0)) {
+                                    hotelPrice['preparedAgents'] = [];
+                                    for (let j = 0; j < hotelPrice.agent_prices.length; j++) {
+                                        let priceOption = hotelPrice.agent_prices[j];
+                                        if (priceOption.hasOwnProperty('agent_prices') && priceOption.agent_prices && (priceOption.agent_prices.length > 0)) {
+                                            priceOption['agents'] = [];
+                                            for (let k = 0; k < priceOption.agent_prices.length; k++) {
+                                                if (agentsMapping.hasOwnProperty(priceOption.agent_prices[k]['id']) && agentsMapping[priceOption.agent_prices[k]['id']]) {
+                                                    priceOption['preparedAgents'].push(agentsMapping[priceOption.agent_prices[k]['id']]);
+                                                }
+                                            }
+                                        }
+                                        
+                                        hotelPrice['price'] = priceOption['price_total'];
+                                        break;
+                                    }
+                                }
+
+                                data.items.push(hotelPrice);
+                            }
+
+                            resolve(data);
+                        }
+                    }
+                })
+                .catch(function (e) {
+                    console.log('SkyscannerNet:hotelsPolling Exception:', e);
+                    if (e.status !== 200) {
+                        reject('Api statusCode ' + e.status);
+                    }
+
+                    reject('Exception! ');
+                });
+        });
+    }
+
+    hotelsDetails(params) {
+        let data = {
+            items : []
+        };
+
+        return new Promise((resolve, reject) => {
+            if (this.getItemProperty(params, 'url', null) === null) {
+                reject('No flights polling url provided!');
+                return;
+            }
+
+            data['resultsUrl'] = params['url'];
+            let queryParams = {
+                pageIndex : this.getItemProperty(params, 'page', 0),
+                pageSize  : this.getItemProperty(params, 'pageSize', 10)
+            };
+
+            this.axiosInstance.get(`${this.url}${params['url']}`,
+                {
+                    params : queryParams
+                })
+                .then((response) => {
+                    if (response.status !== 200) {
+                        reject('Api statusCode ' + response.status);
+                        return;
+                    }
+
+                    if (response && response.hasOwnProperty('data') && response.data) {
+                        if (response.data.hasOwnProperty('hotels') && response.data.hotels && (response.data.hotels.length > 0)) {
+                            let amenitiesMapping = {},
+                                hotelsMapping = {},
+                                agentsMapping = {},
+                                hotelsPriceMapping = {};
+
+                            data['totalCount'] = this.getItemProperty(response.data, 'total_hotels');
+                            data['totalAvailableCount'] =
+                                this.getItemProperty(response.data, 'total_available_hotels');
+
+                            for (let i = 0; i < response.data.amenities.length; i++) {
+                                amenitiesMapping[response.data.amenities[i]['id']] =
+                                    response.data.amenities[i];
+                            }
+
+                            for (let i = 0; i < response.data.agents.length; i++) {
+                                agentsMapping[response.data.agents[i]['id']] =
+                                    response.data.agents[i];
+                            }
+
+                            for (let i = 0; i < response.data.hotels.length; i++) {
+                                let hotel = response.data.hotels[i];
+                                if (hotel.hasOwnProperty('amenities') && hotel.amenities && (hotel.amenities.length > 0)) {
+                                    hotel['preparedAmenities'] = [];
+                                    for (let j = 0; j < hotel.amenities.length; j++) {
+                                        if (amenitiesMapping.hasOwnProperty(hotel.amenities[j]) && amenitiesMapping[hotel.amenities[j]]) {
+                                            hotel['preparedAmenities'].push(amenitiesMapping[hotel.amenities[j]]);
+                                        }
+                                    }
+                                }
+
+                                hotelsMapping[hotel['hotel_id']] = hotel;
+                            }
+
+                            for (let i = 0; i < response.data.hotels_prices.length; i++) {
+                                let hotelPrice = response.data.hotels_prices[i];
+
+                                if (hotelsMapping.hasOwnProperty(hotelPrice['id']) && hotelsMapping[hotelPrice.id]) {
+                                    hotelPrice['hotel'] = hotelsMapping[hotelPrice.id];
+                                }
+
+                                if (hotelPrice.hasOwnProperty('agent_prices') && hotelPrice.agent_prices && (hotelPrice.agent_prices.length > 0)) {
+                                    hotelPrice['preparedAgents'] = [];
+                                    for (let j = 0; j < hotelPrice.agent_prices.length; j++) {
+                                        let priceOption = hotelPrice.agent_prices[j];
+                                        if (priceOption.hasOwnProperty('agent_prices') && priceOption.agent_prices && (priceOption.agent_prices.length > 0)) {
+                                            priceOption['agents'] = [];
+                                            for (let k = 0; k < priceOption.agent_prices.length; k++) {
+                                                if (agentsMapping.hasOwnProperty(priceOption.agent_prices[k]['id']) && agentsMapping[priceOption.agent_prices[k]['id']]) {
+                                                    priceOption['preparedAgents'].push(agentsMapping[priceOption.agent_prices[k]['id']]);
+                                                }
+                                            }
+                                        }
+
+                                        hotelPrice['price'] = priceOption['price_total'];
+                                        break;
+                                    }
+                                }
+
+                                data.items.push(hotelPrice);
+                            }
+
+                            resolve(data);
+                        }
+                    }
+                })
+                .catch(function (e) {
+                    console.log('SkyscannerNet:hotelsDetails Exception:', e);
+                    if (e.status !== 200) {
+                        reject('Api statusCode ' + e.status);
+                    }
+
+                    reject('Exception! ');
+                });
+        });
+    }
+}
+
+module.exports = SkyscannerNetProvider;
